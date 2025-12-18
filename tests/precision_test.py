@@ -1,5 +1,6 @@
 import torch as th
 from wind_rwkv.rwkv7 import *
+from wind_rwkv.rwkv7.triton_minimal import attn_triton_minimal_with_grad
 
 def naive(r,w,k,v,a,b,s0):
     if s0 is None: s0 = th.zeros(w.shape[0],w.shape[2],w.shape[3],w.shape[3], device=w.device)
@@ -83,3 +84,7 @@ grad_check(attn_backstepping_smallhead, naive, params)
 print('Backstepping longhead fp32')
 load_backstepping_longhead(headsz)
 grad_check(attn_backstepping_longhead, naive, params)
+
+print('Triton minimal')
+params_fp32 = [p.float() for p in params]
+grad_check(attn_triton_minimal_with_grad, naive, params_fp32)

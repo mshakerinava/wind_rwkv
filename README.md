@@ -16,6 +16,17 @@ The kernels were timed using [tests/speed_test.py](tests/speed_test.py) with mod
 [^1]: Smallest peak VRAM was typically for (8,64,4096) and largest for (8,256,4096).
 [^2]: Triton fails to compile the kernel, only seen on H100. 
 
+### A100 (forward + backward)
+| Kernel  | (8,64,4096) | (8,128,4096) | (8,256,4096) | (1,256,32768) | Peak VRAM[^1] | Typical error |
+|:----------------------------|------:|-------:|-------:|--------:|--------:|-----:|
+| Chunked bf16                | 15 ms |  24 ms |  [^3] |   [^3] |  5 -  6 GB | 5e-3 |
+| Backstepping fp32 longhead  | 45 ms |  73 ms | 146 ms |  251 ms |  8 - 14 GB | 9e-5 |
+| Backstepping fp32 smallhead | 36 ms | 285 ms |1674 ms | 2779 ms |  7 - 13 GB | 9e-5 |
+| Triton bighead fp32         |135 ms | 239 ms | 470 ms | 2433 ms |  6 - 12 GB | 5e-5 |
+| Triton bighead bf16         | 47 ms | 151 ms | 264 ms | 1243 ms |  6 - 12 GB | 5e-3 |
+| Triton minimal bf16             |185 ms | 471 ms | 465 ms |  743 ms |       9 GB | 1e-2 |
+[^3]: Chunked bf16 crashes with headsz=256 due to shared memory limits (requires >48KB shared memory per block).
+
 ### MI300X
 | Kernel  | (8,64,4096) | (8,128,4096) | (8,256,4096) | (1,256,32768) | Peak VRAM[^1] | Typical error |
 |:----------------------------|------:|-------:|-------:|--------:|--------:|-----:|
@@ -38,13 +49,15 @@ def naive(r,w,k,v,a,b,s):
 Here `r`,`w`,`k`,`v`,`a` and `b` have shape [batch size, sequence length, num heads, head size], while the initial state `s` has shape [batch size, num heads, head size, head size]. All inputs and outputs are bfloat16 precision.
 
 ### [Chunked bf16](wind_rwkv/rwkv7/chunked_cuda/chunked_cuda.cu)
-This is the fastest kernel when applicable. It processes the sequence in chunks of length 16 (chunked formulation) and uses Ampere (CUDA SM80+, i.e., A100 and later) instructions for fast bfloat16 matmuls.
+This is the fastest kernel when applicable. It processes the sequence in chunks of length 16 (chunked formulation) and uses Ampere (CUDA SM80+, i.e., A100 and later) instructions for fast bfloat16 matmuls. Limited to head sizes ≤ 128 due to shared memory requirements (48KB limit on most GPUs).
 ### [Backstepping fp32 smallhead](wind_rwkv/rwkv7/backstepping_smallhead/backstepping_smallhead.cu)
 This is essentially the [official](https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v5/cuda/wkv7_cuda.cu) kernel which was used to train the [RWKV-7 World models](https://huggingface.co/BlinkDL/rwkv-7-world). Calculates gradients by iterating the state backwards in time (max 15 steps). This makes the code simple, but requires 32-bit floats and limits the decay to ca. 0.5.
 ### [Backstepping fp32 longhead](wind_rwkv/rwkv7/backstepping_longhead/backstepping_longhead.cu)
 Backstepping fp32 smallhead becomes very slow for large head sizes, since the full state is kept in registers, which overflow into global memory. To fix this, backstepping fp32 longhead uses the observation that the columns of the state are essentially updated independently. So it processes blocks of 64 or 32 columns indepdently. This increasing parallelization, and keeps less state in shared memory at a time, while keeping most of the simplicity of backstepping fp32 smallhead.
 ### [Triton bighead](wind_rwkv/rwkv7/triton_bighead.py)
 A simple chunked kernel written in triton. The kernel stores intermediate states in global memory instead of shared memory, so it handles large head sizes (like 1024) without crashing. It takes a flag to choose fp32 or bf16 precision[^3] which affects all matmuls inside the triton kernel.
+### [Triton minimal](wind_rwkv/rwkv7/triton_minimal.py)
+A block-parallel Triton kernel using backstepping for gradients. Splits the state matrix rows into blocks for parallel processing. Block size is automatically selected based on head size: BS=32 for headsz≥256 (optimal for memory), BS=64 for headsz=128, and BS=headsz for smaller heads. Forward pass stores sa = S_t @ a at each timestep to enable simple state reversal in backward pass. Competitive performance for large heads (465ms for headsz=256 vs 264ms for Triton bighead bf16). Supports bf16/fp16 inputs (recommended) with ~1% error vs CUDA backstepping for short-medium sequences. **Note:** Gradients may overflow to inf with very long sequences (>128) due to accumulation in backward pass. For production training with long sequences, use Chunked bf16 or Backstepping fp32 longhead instead.
 ### [FLA chunk_rwkv7](https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/rwkv7/chunk.py)
 RWKV-7 triton kernel from [Flash Linear Attention](https://github.com/fla-org/flash-linear-attention). Chunked implementation with partial sequence length parallelization.
 

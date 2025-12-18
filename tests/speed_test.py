@@ -73,8 +73,11 @@ if cmd_args.alg != 'fla':
     elif cmd_args.alg == 'bighead_fp32':
         print('Triton bighead fp32')
         benchmark(attn_triton_bighead_fp32, params)
+    elif cmd_args.alg == 'triton_minimal':
+        print('Triton minimal bf16')
+        benchmark(attn_triton_minimal_with_grad, params)
     else:
-        print('Unknown alg', cmd_args.arg)
+        print('Unknown alg', cmd_args.alg)
 else:
     assert cmd_args.alg == 'fla'
     print('FLA chunk_rwkv7')
